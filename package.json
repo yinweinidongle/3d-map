@@ -1,0 +1,20 @@
+{
+  "name": "3d-map",
+  "version": "1.0.0",
+  "description": "Three.js + TSL 3D globe visualizing China provinces with light pillars",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.161.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.161.0",
+    "@types/node": "^20.12.7",
+    "typescript": "^5.3.3",
+    "vite": "^5.2.0"
+  }
+}
