@@ -3,6 +3,7 @@ import './style.css';
 import {
   AmbientLight,
   BufferGeometry,
+  Clock,
   Color,
   CylinderGeometry,
   DirectionalLight,
@@ -10,6 +11,7 @@ import {
   Line,
   LineBasicMaterial,
   Mesh,
+  MeshStandardMaterial,
   PerspectiveCamera,
   Quaternion,
   Scene,
@@ -18,7 +20,6 @@ import {
   WebGLRenderer
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { MeshStandardNodeMaterial, add, color, float, mix, mul, sin, timerLocal, uv } from 'three/nodes';
 
 const GLOBE_RADIUS = 5;
 const PILLAR_BASE_HEIGHT = 0.9;
@@ -58,19 +59,122 @@ const sunLight = new DirectionalLight('#8fb5ff', 1.2);
 sunLight.position.set(6, 8, 3);
 scene.add(sunLight);
 
-// Globe material using TSL gradient and subtle emissive pulse
-const globeMaterial = new MeshStandardNodeMaterial();
-const oceanTop = color(new Color('#1d4c8f'));
-const oceanBottom = color(new Color('#0b1b3a'));
-const gradient = mix(oceanBottom, oceanTop, uv().y);
-const timeNode = timerLocal({ scale: 0.2 });
-const pulseStrength = mul(sin(timeNode), float(0.08));
-const emissivePulse = add(gradient, mul(gradient, pulseStrength));
+// Globe material with gradient shading and subtle emissive pulse
+type PulseUniform = { value: number };
 
-globeMaterial.colorNode = gradient;
-globeMaterial.emissiveNode = emissivePulse;
-globeMaterial.roughness = 0.45;
-globeMaterial.metalness = 0.0;
+let globePulseUniform: PulseUniform | null = null;
+
+const pillarPulseUniforms: Array<{
+  material: MeshStandardMaterial;
+  uniform: PulseUniform;
+  amplitude: number;
+  speed: number;
+}> = [];
+
+const clock = new Clock();
+
+function configureGlobeMaterial(): MeshStandardMaterial {
+  const material = new MeshStandardMaterial({
+    roughness: 0.45,
+    metalness: 0.0
+  });
+
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.gradientTopColor = { value: new Color('#1d4c8f') };
+    shader.uniforms.gradientBottomColor = { value: new Color('#0b1b3a') };
+    shader.uniforms.gradientPulse = { value: 0 };
+
+    if (!shader.vertexShader.includes('vGradientUv')) {
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <uv_pars_vertex>', '#include <uv_pars_vertex>\nvarying vec2 vGradientUv;')
+        .replace('#include <uv_vertex>', '#include <uv_vertex>\nvGradientUv = uv;');
+    }
+
+    if (!shader.fragmentShader.includes('gradientTopColor')) {
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <uv_pars_fragment>',
+          '#include <uv_pars_fragment>\nvarying vec2 vGradientUv;\nuniform vec3 gradientTopColor;\nuniform vec3 gradientBottomColor;\nuniform float gradientPulse;'
+        )
+        .replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+        diffuseColor.rgb = mix(gradientBottomColor, gradientTopColor, vGradientUv.y);
+      `
+        )
+        .replace(
+          '#include <emissivemap_fragment>',
+          `#include <emissivemap_fragment>
+        vec3 emissiveGradient = mix(gradientBottomColor, gradientTopColor, vGradientUv.y);
+        totalEmissiveRadiance += emissiveGradient * (1.0 + gradientPulse);
+      `
+        );
+    }
+
+    globePulseUniform = shader.uniforms.gradientPulse as PulseUniform;
+  };
+
+  material.needsUpdate = true;
+
+  return material;
+}
+
+function configurePillarMaterial(): MeshStandardMaterial {
+  const material = new MeshStandardMaterial({
+    roughness: 0.2,
+    metalness: 0.0,
+    transparent: true,
+    opacity: 0.92
+  });
+
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.gradientTopColor = { value: new Color('#9bf6ff') };
+    shader.uniforms.gradientBottomColor = { value: new Color('#31c6ff') };
+    shader.uniforms.gradientPulse = { value: 0 };
+
+    if (!shader.vertexShader.includes('vGradientUv')) {
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <uv_pars_vertex>', '#include <uv_pars_vertex>\nvarying vec2 vGradientUv;')
+        .replace('#include <uv_vertex>', '#include <uv_vertex>\nvGradientUv = uv;');
+    }
+
+    if (!shader.fragmentShader.includes('gradientTopColor')) {
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <uv_pars_fragment>',
+          '#include <uv_pars_fragment>\nvarying vec2 vGradientUv;\nuniform vec3 gradientTopColor;\nuniform vec3 gradientBottomColor;\nuniform float gradientPulse;'
+        )
+        .replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+        diffuseColor.rgb = mix(gradientBottomColor, gradientTopColor, vGradientUv.y);
+      `
+        )
+        .replace(
+          '#include <emissivemap_fragment>',
+          `#include <emissivemap_fragment>
+        vec3 emissiveGradient = mix(gradientBottomColor, gradientTopColor, vGradientUv.y);
+        totalEmissiveRadiance += emissiveGradient * (0.6 + gradientPulse);
+      `
+        );
+    }
+
+    const pulseUniform = shader.uniforms.gradientPulse as PulseUniform;
+    const existing = pillarPulseUniforms.find((entry) => entry.material === material);
+
+    if (existing) {
+      existing.uniform = pulseUniform;
+    } else {
+      pillarPulseUniforms.push({ material, uniform: pulseUniform, amplitude: 0.4, speed: 0.8 });
+    }
+  };
+
+  material.needsUpdate = true;
+
+  return material;
+}
+
+const globeMaterial = configureGlobeMaterial();
 
 const globeGeometry = new SphereGeometry(GLOBE_RADIUS, 128, 128);
 const globeMesh = new Mesh(globeGeometry, globeMaterial);
@@ -139,18 +243,7 @@ function addProvincePillar(feature: ProvinceFeature): void {
   const radius = feature.properties.radius;
   const height = PILLAR_BASE_HEIGHT + radius * PILLAR_HEIGHT_SCALE;
 
-  const pillarMaterial = new MeshStandardNodeMaterial();
-  const pillarBase = color(new Color('#31c6ff'));
-  const pillarTip = color(new Color('#9bf6ff'));
-  const pillarGradient = mix(pillarBase, pillarTip, uv().y);
-  const pulse = add(float(0.6), mul(float(0.4), sin(timerLocal({ scale: 0.8 }))));
-
-  pillarMaterial.colorNode = pillarGradient;
-  pillarMaterial.emissiveNode = mul(pillarGradient, pulse);
-  pillarMaterial.roughness = 0.2;
-  pillarMaterial.metalness = 0.0;
-  pillarMaterial.transparent = true;
-  pillarMaterial.opacity = 0.92;
+  const pillarMaterial = configurePillarMaterial();
 
   const geometry = new CylinderGeometry(0.08, 0.12, height, 24, 1, true);
   geometry.translate(0, height / 2, 0);
@@ -191,6 +284,16 @@ window.addEventListener('resize', onWindowResize);
 
 function animate() {
   requestAnimationFrame(animate);
+  const elapsed = clock.getElapsedTime();
+
+  if (globePulseUniform) {
+    globePulseUniform.value = Math.sin(elapsed * 0.2) * 0.08;
+  }
+
+  pillarPulseUniforms.forEach((entry) => {
+    entry.uniform.value = Math.sin(elapsed * entry.speed) * entry.amplitude;
+  });
+
   boundaryGroup.rotation.y += 0.0006;
   pillarGroup.rotation.y += 0.0006;
   globeMesh.rotation.y += 0.0004;
