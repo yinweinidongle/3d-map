@@ -1,0 +1,201 @@
+import './style.css';
+
+import {
+  AmbientLight,
+  BufferGeometry,
+  Color,
+  CylinderGeometry,
+  DirectionalLight,
+  Group,
+  Line,
+  LineBasicMaterial,
+  Mesh,
+  PerspectiveCamera,
+  Quaternion,
+  Scene,
+  SphereGeometry,
+  Vector3,
+  WebGLRenderer
+} from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { MeshStandardNodeMaterial, add, color, float, mix, mul, sin, timerLocal, uv } from 'three/nodes';
+
+const GLOBE_RADIUS = 5;
+const PILLAR_BASE_HEIGHT = 0.9;
+const PILLAR_HEIGHT_SCALE = 0.35;
+const DEG2RAD = Math.PI / 180;
+
+const container = document.getElementById('app');
+
+if (!container) {
+  throw new Error('Missing #app container');
+}
+
+const scene = new Scene();
+scene.background = new Color('#02030c');
+
+const camera = new PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 0, 14);
+
+const renderer = new WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+container.innerHTML = '';
+container.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.rotateSpeed = 0.4;
+controls.minDistance = 8;
+controls.maxDistance = 24;
+
+const ambientLight = new AmbientLight('#3d4b6a', 0.6);
+scene.add(ambientLight);
+
+const sunLight = new DirectionalLight('#8fb5ff', 1.2);
+sunLight.position.set(6, 8, 3);
+scene.add(sunLight);
+
+// Globe material using TSL gradient and subtle emissive pulse
+const globeMaterial = new MeshStandardNodeMaterial();
+const oceanTop = color(new Color('#1d4c8f'));
+const oceanBottom = color(new Color('#0b1b3a'));
+const gradient = mix(oceanBottom, oceanTop, uv().y);
+const timeNode = timerLocal({ scale: 0.2 });
+const pulseStrength = mul(sin(timeNode), float(0.08));
+const emissivePulse = add(gradient, mul(gradient, pulseStrength));
+
+globeMaterial.colorNode = gradient;
+globeMaterial.emissiveNode = emissivePulse;
+globeMaterial.roughness = 0.45;
+globeMaterial.metalness = 0.0;
+
+const globeGeometry = new SphereGeometry(GLOBE_RADIUS, 128, 128);
+const globeMesh = new Mesh(globeGeometry, globeMaterial);
+scene.add(globeMesh);
+
+const boundaryGroup = new Group();
+boundaryGroup.name = 'Province Boundaries';
+scene.add(boundaryGroup);
+
+const pillarGroup = new Group();
+pillarGroup.name = 'Province Pillars';
+scene.add(pillarGroup);
+
+const boundaryMaterial = new LineBasicMaterial({ color: '#7ec8ff', transparent: true, opacity: 0.75 });
+
+interface ProvinceFeature {
+  type: 'Feature';
+  properties: {
+    name: string;
+    center: [number, number];
+    radius: number;
+  };
+  geometry: {
+    type: 'Polygon';
+    coordinates: number[][][];
+  };
+}
+
+interface FeatureCollection {
+  type: 'FeatureCollection';
+  features: ProvinceFeature[];
+}
+
+async function loadGeoJSON(): Promise<FeatureCollection> {
+  const response = await fetch(new URL('./assets/china-provinces.geojson', import.meta.url));
+  if (!response.ok) {
+    throw new Error(`Failed to load provinces GeoJSON: ${response.status}`);
+  }
+  return response.json();
+}
+
+function lonLatToVector3(lon: number, lat: number, radius: number): Vector3 {
+  const phi = (90 - lat) * DEG2RAD;
+  const theta = (lon + 180) * DEG2RAD;
+  const sinPhi = Math.sin(phi);
+
+  const x = -radius * sinPhi * Math.cos(theta);
+  const z = radius * sinPhi * Math.sin(theta);
+  const y = radius * Math.cos(phi);
+
+  return new Vector3(x, y, z);
+}
+
+function addProvinceBoundaries(feature: ProvinceFeature): void {
+  const { coordinates } = feature.geometry;
+  coordinates.forEach((ring) => {
+    const points = ring.map(([lon, lat]) => lonLatToVector3(lon, lat, GLOBE_RADIUS + 0.02));
+    const geometry = new BufferGeometry().setFromPoints(points);
+    const line = new Line(geometry, boundaryMaterial);
+    boundaryGroup.add(line);
+  });
+}
+
+function addProvincePillar(feature: ProvinceFeature): void {
+  const [lon, lat] = feature.properties.center;
+  const radius = feature.properties.radius;
+  const height = PILLAR_BASE_HEIGHT + radius * PILLAR_HEIGHT_SCALE;
+
+  const pillarMaterial = new MeshStandardNodeMaterial();
+  const pillarBase = color(new Color('#31c6ff'));
+  const pillarTip = color(new Color('#9bf6ff'));
+  const pillarGradient = mix(pillarBase, pillarTip, uv().y);
+  const pulse = add(float(0.6), mul(float(0.4), sin(timerLocal({ scale: 0.8 }))));
+
+  pillarMaterial.colorNode = pillarGradient;
+  pillarMaterial.emissiveNode = mul(pillarGradient, pulse);
+  pillarMaterial.roughness = 0.2;
+  pillarMaterial.metalness = 0.0;
+  pillarMaterial.transparent = true;
+  pillarMaterial.opacity = 0.92;
+
+  const geometry = new CylinderGeometry(0.08, 0.12, height, 24, 1, true);
+  geometry.translate(0, height / 2, 0);
+
+  const normal = lonLatToVector3(lon, lat, 1).normalize();
+  const position = lonLatToVector3(lon, lat, GLOBE_RADIUS + 0.05);
+  position.addScaledVector(normal, height / 2);
+
+  const quaternion = new Quaternion();
+  quaternion.setFromUnitVectors(new Vector3(0, 1, 0), normal);
+
+  const pillarMesh = new Mesh(geometry, pillarMaterial);
+  pillarMesh.position.copy(position);
+  pillarMesh.quaternion.copy(quaternion);
+
+  pillarGroup.add(pillarMesh);
+}
+
+(async function init() {
+  try {
+    const geojson = await loadGeoJSON();
+    geojson.features.forEach((feature) => {
+      addProvinceBoundaries(feature);
+      addProvincePillar(feature);
+    });
+  } catch (error) {
+    console.error(error);
+  }
+})();
+
+function onWindowResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+window.addEventListener('resize', onWindowResize);
+
+function animate() {
+  requestAnimationFrame(animate);
+  boundaryGroup.rotation.y += 0.0006;
+  pillarGroup.rotation.y += 0.0006;
+  globeMesh.rotation.y += 0.0004;
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+animate();
